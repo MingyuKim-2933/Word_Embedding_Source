@@ -64,7 +64,7 @@ def main():
         array = array / np.sqrt(np.sum(array * array + 1e-8))
         word_vecs[tokens[0]] = array
 
-    most_similar(word, word_vecs)
+    most_similar(word, word_vecs, 5)
 
 
 if __name__ == "__main__":
