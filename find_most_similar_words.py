@@ -1,6 +1,7 @@
 import io
 import sys
 import numpy as np
+import decompose
 
 
 def cos_similarity(x, y, eps=1e-8):
@@ -16,7 +17,7 @@ def cos_similarity(x, y, eps=1e-8):
     return np.dot(nx, ny)
 
 
-def most_similar(query, word_to_vec, top=5):
+def most_similar(query, word_to_vec, top=10):
     '''유사 단어 검색
     :param query: 쿼리(텍스트)
     :param word_to_vec: word_tovec
@@ -37,7 +38,10 @@ def most_similar(query, word_to_vec, top=5):
     similarity = np.zeros(vocab_size)
     cnt = 0
     for i in word_to_vec.values():
-        similarity[cnt] = cos_similarity(i, query_vec)
+        if cnt >= 1137209:
+            break
+        if cnt != 0:
+            similarity[cnt] = cos_similarity(i, query_vec)
         cnt += 1
 
     # 코사인 유사도를 기준으로 내림차순으로 출력
@@ -45,7 +49,8 @@ def most_similar(query, word_to_vec, top=5):
     for i in (-1 * similarity).argsort():
         if word_to_vec_keys[i] == query:
             continue
-        print(' %s: %s' % (word_to_vec_keys[i], similarity[i]))
+        reconstructed_word = decompose.reconstruct_word_jamo(word_to_vec_keys[i]) # decompose된 단어를 재조합한다.
+        print(' %s: %.3f' % (reconstructed_word, similarity[i]))
 
         count += 1
         if count >= top:
@@ -54,7 +59,9 @@ def most_similar(query, word_to_vec, top=5):
 
 def main():
     vec_file_path = sys.argv[1]
-    word = sys.argv[2]
+    word_file_path = sys.argv[2]
+
+
     fin = io.open(vec_file_path, 'r', encoding='utf-8', newline='\n', errors='ignore')
     word_vecs = {}
 
@@ -64,7 +71,11 @@ def main():
         array = array / np.sqrt(np.sum(array * array + 1e-8))
         word_vecs[tokens[0]] = array
 
-    most_similar(word, word_vecs, 10)
+    with open(word_file_path, "r", encoding='utf-8') as f:
+        while True:
+            word = f.readline().strip()
+            if not word: break
+            most_similar(word, word_vecs)
 
 
 if __name__ == "__main__":
