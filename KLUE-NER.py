@@ -1,21 +1,18 @@
 # -*- coding: utf-8 -*-
-import numpy as np
-import hgtk
-import pandas as pd
 import io, os, sys
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
-from subchar_rule import subchar_dict
+import numpy as np
+import pandas as pd
 
-import tensorflow as tf
-from tensorflow.keras import optimizers
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Flatten, Dense, Embedding, Conv1D, LSTM, Dropout
+from tensorflow.keras.layers import Flatten, Dense, Embedding, LSTM, Dropout
 from tensorflow.python.keras.preprocessing.sequence import pad_sequences
 from tensorflow.python.keras.preprocessing.text import Tokenizer
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras import backend as K
+from keras import backend as K
+from keras.callbacks import LambdaCallback
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.layers import Bidirectional, TimeDistributed
 
-tf.get_logger().setLevel('ERROR')
+
 
 def recall(y_target, y_pred):
     # clip(t, clip_value_min, clip_value_max) : clip_value_min~clip_value_max 이외 가장자리를 깎아 낸다
@@ -67,153 +64,221 @@ def f1score(y_target, y_pred):
     return _f1score
 
 
-def get_dir_from_train_code(train_code):
-    if 'stroke' in train_code:
-        result = 'stroke'
-    elif 'cji' in train_code:
-        result = 'cji'
-    elif 'bts' in train_code:
-        result = 'bts'
-    else:
-        raise ValueError
-
-    if 'jm' in train_code:
-        result = f'jm_{result}'
-    elif 'ch_14' in train_code:
-        result = f'ch4_{result}'
-    elif 'ch_15' in train_code:
-        result = f'ch5_{result}'
-    elif 'ch_16' in train_code:
-        result = f'ch6_{result}'    
-
-    return result
-
 def main():
-    train_code = sys.argv[1]
-    vocab = sys.argv[2]  # pretrain, train, all
-    epochs = eval(sys.argv[3])
-    dropout = eval(sys.argv[4])
-    recurrent_dropout = eval(sys.argv[5])
-    decompose_level = 4 if "stroke" in train_code else 5 if "cji" in train_code else 6
+    NER_TRAIN_PATH = sys.argv[1]
+    NER_TEST_PATH = sys.argv[2]
+    VEC_FILE_PATH = sys.argv[3]
+
+    fin = io.open(VEC_FILE_PATH, 'r', encoding='utf-8', newline='\n', errors='ignore')
+
+    print("loading...")
+
     word_vecs = {}
-    if vocab != 'train':
-        # load pretrained word vectors
-        FNAME_pretrain = f"./results/{get_dir_from_train_code(train_code)}/{train_code}.vec"
-        fin = io.open(FNAME_pretrain, 'r', encoding='utf-8', newline='\n', errors='ignore')
-        for i, line in enumerate(fin):
-            tokens = line.rstrip().split(' ')
-            array = np.array(list(map(float, tokens[1:])))
-            array = array / np.sqrt(np.sum(array * array + 1e-8))
-            word_vecs[tokens[0]] = array
-        fin.__exit__()
-    
-    FNAME = f"./vectors/sent_analysis/{train_code}_vectors.txt"
-    fin = io.open(FNAME, 'r', encoding='utf-8', newline='\n', errors='ignore')
-    word_vecs = {}
+
     for i, line in enumerate(fin):
-        tokens = line.rstrip().split(' ')
-        if tokens[0] in word_vecs:
+         tokens = line.rstrip().split(' ')
+         array = np.array(list(map(float, tokens[1:])))
+         array = array / np.sqrt(np.sum(array * array + 1e-8))
+         word_vecs[tokens[0]] = array
+
+    # train_data = pd.read_csv(NER_TRAIN_PATH, header=0)
+    # test_data = pd.read_csv(NER_TEST_PATH, header=0)
+
+    ## 문장들만 모아둔 파일
+    train_data = open(NER_TRAIN_PATH, encoding='utf-8')
+    test_data = open(NER_TEST_PATH, encoding='utf-8')
+
+
+
+    ## 문장 단위 단어리스트
+    words = []
+
+    ## 문장 단위 레이블리스트
+    labels = []
+
+    ## 전체 토큰 포함 이중리스트 (기존 리스트)
+    data_list = []
+
+    line = 1
+    while (line):
+        try:
+            line = train_data.readline()
+            sen = line
+            sen = sen.replace('>',' ').replace('<',' ').replace('.','').replace('\n','').replace('\'','').split(' ')
+            while '' in sen:
+                sen.remove('')
+            # print(sen)
+            li = []
+            for word in sen:
+                tmp = []
+                if word.find(':') > 0:
+                    tmp = word.split(':')
+                else:
+                    tmp.append(word)
+                    tmp.append('0')
+                if len(tmp) != 2:
+                    str = ":".join(tmp[:-1])
+                    tmp = [str, tmp[-1]]
+                    # print(tmp)
+                li.append(tmp)
+
+            data_list += li
+            data_list += '*'
+        except:
             continue
-        array = np.array(list(map(float, tokens[1:])))
-        array = array / np.sqrt(np.sum(array * array + 1e-8))
-        word_vecs[tokens[0]] = array
-    fin.__exit__()
-    # Load and tokenize corpus
-    # print("loading...")
 
-    train_data = pd.read_csv(f"./data/parsed_sent_analysis/parsed_sent_analysis_train_{decompose_level}.txt", header=0, delimiter='\t', quoting=3)
-    dev_data = pd.read_csv(f"./data/parsed_sent_analysis/parsed_sent_analysis_dev_{decompose_level}.txt", header=0, delimiter='\t', quoting=3)
-    test_data = pd.read_csv(f"./data/parsed_sent_analysis/parsed_sent_analysis_test_{decompose_level}.txt", header=0, delimiter='\t', quoting=3)
-
-    text_train = []
-    for line in open(f"./data/parsed_sent_analysis/parsed_sent_analysis_train_{decompose_level}.txt", 'r', encoding="utf-8"):
-        if line.startswith("id"):
+    tmp_words = []
+    tmp_labels = []
+    for l in data_list:
+        if l == '*':
+            if tmp_words != [] and tmp_labels != []:
+                words.append(tmp_words)
+                labels.append(tmp_labels)
+            tmp_words = []
+            tmp_labels = []
             continue
-        words = list(line.split('\t')[1].strip().split())
-        text_train.append(words)
+        else:
+            tmp_words.append(l[0])
+            tmp_labels.append(l[1])
 
-    text_dev = []
-    for line in open(f"./data/parsed_sent_analysis/parsed_sent_analysis_dev_{decompose_level}.txt", 'r', encoding="utf-8"):
-        if line.startswith("id"):
+    # 문장 개수 확인용
+    print(len(words))
+    print(len(labels))
+
+    train_data.close()
+
+    ## 문장 단위 단어리스트
+    words2 = []
+
+    ## 문장 단위 레이블리스트
+    labels2 = []
+
+    ## 전체 토큰 포함 이중리스트 (기존 리스트)
+    data_list2 = []
+
+    line = 1
+    while (line):
+        try:
+            line = test_data.readline()
+            sen = line
+            sen = sen.replace('>',' ').replace('<',' ').replace('.','').replace('\n','').replace('\'','').split(' ')
+            while '' in sen:
+                sen.remove('')
+            # print(sen)
+            li = []
+            for word in sen:
+                tmp = []
+                if word.find(':') > 0:
+                    tmp = word.split(':')
+                else:
+                    tmp.append(word)
+                    tmp.append('0')
+                if len(tmp) != 2:
+                    str = ":".join(tmp[:-1])
+                    tmp = [str, tmp[-1]]
+                    # print(tmp)
+                li.append(tmp)
+
+            data_list2 += li
+            data_list2 += '*'
+        except:
             continue
-        words = list(line.split('\t')[1].strip().split())
-        text_dev.append(words)
 
-    text_test = []
-    for line in open(f"./data/parsed_sent_analysis/parsed_sent_analysis_test_{decompose_level}.txt", 'r', encoding="utf-8"):
-        if line.startswith("id"):
+    tmp_words = []
+    tmp_labels = []
+    for l in data_list2:
+        if l == '*':
+            if tmp_words != [] and tmp_labels != []:
+                words2.append(tmp_words)
+                labels2.append(tmp_labels)
+            tmp_words = []
+            tmp_labels = []
             continue
-        words = list(line.split('\t')[1].strip().split())
-        text_test.append(words)
-    # print("Tokenizing...")
+        else:
+            tmp_words.append(l[0])
+            tmp_labels.append(l[1])
 
-    if vocab == "train":
-        text_to_use = text_train
-    else:
-        text_to_use = text_train + text_dev + text_test
+    # 문장 개수 확인용
+    print(len(words2))
+    print(len(labels2))
 
-    tokenizer = Tokenizer(oov_token="<UNK>")
-    tokenizer.fit_on_texts(text_to_use)
+    test_data.close()
 
-    MAX_SEQUENCE_LENGTH = 30
-    train_sequence = tokenizer.texts_to_sequences(text_train)  # max 47
-    train_inputs = pad_sequences(train_sequence, maxlen=MAX_SEQUENCE_LENGTH, padding='post')
-    train_labels = np.array(train_data['label'])
+    result = []
+    for x in labels:
+        for tmp in x:
+            if tmp not in result:
+                result.append(tmp)
 
-    dev_sequence = tokenizer.texts_to_sequences(text_dev)  # max 40
-    dev_inputs = pad_sequences(dev_sequence, maxlen=MAX_SEQUENCE_LENGTH, padding='post')
-    dev_labels = np.array(dev_data['label'])
+    result2 = []
+    for x in labels2:
+        for tmp in x:
+            if tmp not in result2:
+                result2.append(tmp)
 
-    test_sequence = tokenizer.texts_to_sequences(text_test)  # max 38
-    test_inputs = pad_sequences(test_sequence, maxlen=MAX_SEQUENCE_LENGTH, padding='post')
-    test_labels = np.array(test_data['label'])
+    print(result)
+    print(result2)
 
-    word_size = len(tokenizer.word_index) + 1  # 1을 더해주는 것은 padding으로 채운 0 때문입니다
+    print("Tokenizing...")
+
+    src_tokenizer = Tokenizer(oov_token="<UNK>")
+    src_tokenizer.fit_on_texts(words)
+    x_train = src_tokenizer.texts_to_sequences(words)
+    MAX_SEQUENCE_LENGTH = 20
+    x_train = pad_sequences(x_train, maxlen=MAX_SEQUENCE_LENGTH)
+
+    tar_tokenizer = Tokenizer()
+    tar_tokenizer.fit_on_texts(labels)
+
+    tag_size = len(tar_tokenizer.word_index) + 1
+
+    y_train = tar_tokenizer.texts_to_sequences(labels)
+    y_train = pad_sequences(y_train, maxlen=MAX_SEQUENCE_LENGTH)
+    y_train = to_categorical(y_train, num_classes=tag_size)
+
+    # -----------------------------------------------------------------
+
+    src2_tokenizer = Tokenizer(oov_token="<UNK>")
+    src2_tokenizer.fit_on_texts(words2)
+    x_test = src2_tokenizer.texts_to_sequences(words2)
+    MAX_SEQUENCE_LENGTH = 20
+    x_test = pad_sequences(x_test, maxlen=MAX_SEQUENCE_LENGTH)
+
+    tar2_tokenizer = Tokenizer()
+    tar2_tokenizer.fit_on_texts(labels2)
+
+    tag_size2 = len(tar2_tokenizer.word_index) + 1
+
+    y_test = tar2_tokenizer.texts_to_sequences(labels2)
+    y_test = pad_sequences(y_test, maxlen=MAX_SEQUENCE_LENGTH)
+    y_test = to_categorical(y_test, num_classes=tag_size2)
+
+    word_size = len(src_tokenizer.word_index) + 1  # 1을 더해주는 것은 padding으로 채운 0 때문입니다
     EMBEDDING_DIM = 300
 
     embedding_matrix = np.zeros((word_size, EMBEDDING_DIM))
 
     # tokenizer에 있는 단어 사전을 순회하면서 word2vec의 300차원 vector를 가져옵니다
-    for word, idx in tokenizer.word_index.items():
+    for word, idx in src_tokenizer.word_index.items():
         embedding_vector = word_vecs[word] if word in word_vecs else None
         if embedding_vector is not None:
             embedding_matrix[idx] = embedding_vector
 
-    random_seeds = [42, 99, 1128]
-    acc_total = 0
-    precision_total = 0
-    recall_total = 0
-    f1_total = 0
-    for seed in random_seeds:
-        tf.keras.backend.clear_session()
-        tf.random.set_seed(seed)
-        model = Sequential()
-        model.add(Embedding(word_size, 300, input_length=MAX_SEQUENCE_LENGTH, weights=[embedding_matrix], trainable=False))
-        model.add(LSTM(300, dropout=dropout, recurrent_dropout=recurrent_dropout))
-        model.add(Dropout(0.5))
-        model.add(Dense(1, activation='sigmoid'))
-        # model.summary()
+    model = Sequential()
+    model.add(Embedding(word_size, 300, input_length=MAX_SEQUENCE_LENGTH, weights=[embedding_matrix], trainable=False, mask_zero=True))
+    model.add(Bidirectional(LSTM(300, dropout=0.5, return_sequences=True)))
+    model.add(TimeDistributed(Dense(tag_size, activation='softmax')))
 
-        model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy', precision, recall, f1score])
+    model.summary()
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy', precision, recall, f1score])
 
-        # es = EarlyStopping(monitor='val_loss', mode='min')
-        model.fit(train_inputs, train_labels, epochs=epochs, verbose=0, validation_data=(dev_inputs, dev_labels)) #, callbacks=[es])
+    model.fit(x_train, y_train, epochs=3)
 
-        _loss, _acc, _precision, _recall, _f1score = model.evaluate(test_inputs, test_labels, verbose=0)
-        acc_total += _acc
-        precision_total += _precision
-        recall_total += _recall
-        f1_total += _f1score
-    
-    print(f"Results for {train_code}, {vocab}, epochs {epochs}")
-    acc_total /= len(random_seeds)
-    acc_total *= 100
-    precision_total /= len(random_seeds)
-    recall_total /= len(random_seeds)
-    f1 = 2 / (1/precision_total + 1/recall_total)
-    f1_total /= len(random_seeds)
-    print('accuracy: {:.2f}%, precision: {:.3f}, recall: {:.3f}, f1score: {:.3f}, f1_average: {:.3f}'.format(acc_total, precision_total, recall_total, f1, f1_total))
-    print()
+    _loss, _acc, _precision, _recall, _f1score = model.evaluate(x_test, y_test)
+    print('loss: {:.3f}, accuracy: {:.3f}, precision: {:.3f}, recall: {:.3f}, f1score: {:.3f}'.format(_loss, _acc,
+                                                                                                      _precision,
+                                                                                                      _recall,
+                                                                                                      _f1score))
 
 
 if __name__ == "__main__":
